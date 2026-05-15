@@ -1,17 +1,11 @@
 import requests
 import psycopg2
 import logging
+import os
 from datetime import datetime, timezone
+from psycopg2.extras import RealDictCursor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "cryptoflow",
-    "user": "postgres",
-    "password": "Zander123!"
-}
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
@@ -23,29 +17,56 @@ PARAMS = {
     "sparkline": False
 }
 
+
+def get_conn():
+    return psycopg2.connect(
+        os.getenv("DATABASE_URL"),
+        cursor_factory=RealDictCursor
+    )
+
+
 def fetch_coins():
     logging.info("Fetching top 20 coins from CoinGecko...")
-    response = requests.get(COINGECKO_URL, params=PARAMS)
+
+    HEADERS = {
+        "x-cg-demo-api-key": "CG-N6mZ7unYxXmcuGPFWndr6VBt",
+        "User-Agent": "CryptoFlow/1.0"
+    }
+
+    response = requests.get(
+        COINGECKO_URL,
+        params=PARAMS,
+        headers=HEADERS
+    )
+
+    print("Status:", response.status_code)
     response.raise_for_status()
     return response.json()
 
+
 def insert_data(coins):
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = get_conn()
     cur = conn.cursor()
+
     timestamp = datetime.now(timezone.utc)
-    inserted = 0
 
     for coin in coins:
-        # Upsert coin metadata
+        # upsert coin metadata
         cur.execute("""
             INSERT INTO coins (id, name, symbol, market_cap_rank)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE
             SET market_cap_rank = EXCLUDED.market_cap_rank
-        """, (coin["id"], coin["name"], coin["symbol"], coin["market_cap_rank"]))
+        """, (
+            coin["id"],
+            coin["name"],
+            coin["symbol"],
+            coin["market_cap_rank"]
+        ))
 
-        # Insert current price as OHLCV (current price used for all since markets endpoint doesn't give OHLCV)
         price = coin["current_price"]
+
+        # insert price snapshot
         cur.execute("""
             INSERT INTO prices (coin_id, timestamp, open, high, low, close, volume)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -59,12 +80,13 @@ def insert_data(coins):
             price,
             coin["total_volume"]
         ))
-        inserted += 1
 
     conn.commit()
     cur.close()
     conn.close()
-    logging.info(f"Done — {inserted} coins processed.")
+
+    logging.info("Ingestion complete.")
+
 
 if __name__ == "__main__":
     coins = fetch_coins()
