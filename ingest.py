@@ -2,7 +2,8 @@ import requests
 import psycopg2
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from psycopg2.extras import RealDictCursor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -18,6 +19,9 @@ PARAMS = {
 }
 
 
+# -------------------------
+# DB CONNECTION (Neon)
+# -------------------------
 def get_conn():
     return psycopg2.connect(
         os.getenv("DATABASE_URL"),
@@ -25,6 +29,25 @@ def get_conn():
     )
 
 
+# -------------------------
+# DISCORD ALERT
+# -------------------------
+def send_discord_alert(message: str):
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+
+    if not webhook_url:
+        logging.warning("No Discord webhook found.")
+        return
+
+    try:
+        requests.post(webhook_url, json={"content": message})
+    except Exception as e:
+        logging.error(f"Discord alert failed: {e}")
+
+
+# -------------------------
+# FETCH DATA
+# -------------------------
 def fetch_coins():
     logging.info("Fetching top 20 coins from CoinGecko...")
 
@@ -39,19 +62,24 @@ def fetch_coins():
         headers=HEADERS
     )
 
-    print("Status:", response.status_code)
+    logging.info(f"Status: {response.status_code}")
     response.raise_for_status()
+
     return response.json()
 
 
+# -------------------------
+# INSERT INTO DATABASE
+# -------------------------
 def insert_data(coins):
     conn = get_conn()
     cur = conn.cursor()
 
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime.utcnow()
+    inserted = 0
 
     for coin in coins:
-        # upsert coin metadata
+        # coins table
         cur.execute("""
             INSERT INTO coins (id, name, symbol, market_cap_rank)
             VALUES (%s, %s, %s, %s)
@@ -66,7 +94,7 @@ def insert_data(coins):
 
         price = coin["current_price"]
 
-        # insert price snapshot
+        # prices table
         cur.execute("""
             INSERT INTO prices (coin_id, timestamp, open, high, low, close, volume)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -81,13 +109,32 @@ def insert_data(coins):
             coin["total_volume"]
         ))
 
+        inserted += 1
+
     conn.commit()
     cur.close()
     conn.close()
 
-    logging.info("Ingestion complete.")
+    logging.info(f"Inserted {inserted} coins.")
 
 
+    # -------------------------
+    # DISCORD NOTIFICATION
+    # -------------------------
+    pst_time = datetime.now(
+        ZoneInfo("America/Los_Angeles")
+    ).strftime("%Y-%m-%d %I:%M:%S %p")
+
+    send_discord_alert(
+        f"🟢 CryptoFlow Ingestion Complete\n"
+        f"Coins updated: {inserted}\n"
+        f"PST Time: {pst_time}"
+    )
+
+
+# -------------------------
+# MAIN
+# -------------------------
 if __name__ == "__main__":
     coins = fetch_coins()
     insert_data(coins)
